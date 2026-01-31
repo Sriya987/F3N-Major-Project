@@ -1,0 +1,7 @@
+{
+  "name": "F3N app",
+  "description": "A hybrid AI system for clinical report summarization, generating structured SOAP notes from dialogues and lab data with multi-model analysis and a context-aware medical chatbot.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
