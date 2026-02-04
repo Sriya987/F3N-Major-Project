@@ -29,12 +29,13 @@ const Layout: React.FC<LayoutProps> = ({ children, activeView, setView }) => {
     { id: 'patients', label: 'Patient Directory', icon: 'fa-users' },
     { id: 'generate', label: 'Generate SOAP', icon: 'fa-file-medical' },
     { id: 'history', label: 'All Records', icon: 'fa-history' },
-    { id: 'compare', label: 'Model Analysis', icon: 'fa-microscope' },
     { id: 'chat', label: 'Clinical Chat', icon: 'fa-comment-medical' },
   ];
 
   const patientNavItems: { id: ViewState; label: string; icon: string }[] = [
     { id: 'dashboard', label: 'My Records', icon: 'fa-history' },
+    { id: 'chat', label: 'Health Assistant', icon: 'fa-comment-medical' },
+    { id: 'profile', label: 'My Profile', icon: 'fa-user-cog' },
   ];
 
   const navItems = authState.type === 'doctor' ? drNavItems : patientNavItems;
@@ -45,9 +46,9 @@ const Layout: React.FC<LayoutProps> = ({ children, activeView, setView }) => {
         <div className="p-6">
           <h1 className="text-xl font-bold flex items-center gap-2">
             <i className="fas fa-heart-pulse text-blue-400"></i>
-            ClinicalMind
+            From Findings to Final Notes
           </h1>
-          <p className="text-slate-400 text-xs mt-1">Hybrid AI Scribe</p>
+          {/* <p className="text-slate-400 text-xs mt-1">Hybrid AI Scribe</p> */}
           
           <div className="mt-4 flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${isOnline === null ? 'bg-slate-500' : isOnline ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.6)]'}`}></div>

@@ -45,7 +45,7 @@ export interface AuthState {
   type: UserType | null;
 }
 
-export type ViewState = 'dashboard' | 'generate' | 'patients' | 'history' | 'compare' | 'chat' | 'signup' | 'auth';
+export type ViewState = 'dashboard' | 'generate' | 'patients' | 'history' | 'chat' | 'signup' | 'auth' | 'profile';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';

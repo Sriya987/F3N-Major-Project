@@ -13,8 +13,8 @@ const Dashboard: React.FC<DashboardProps> = ({ notes, onGenerateClick }) => {
     <div className="space-y-6 animate-fadeIn">
       {selectedNote ? (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto">
-            <div className="p-6 border-b border-slate-200 flex justify-between items-center sticky top-0 bg-white">
+          <div className="bg-white rounded-2xl shadow-xl max-w-4xl w-full max-h-[95vh] overflow-y-auto">
+            <div className="p-6 border-b border-slate-200 flex justify-between items-center sticky top-0 bg-white z-10">
               <h2 className="text-xl font-bold text-slate-800">Encounter Details</h2>
               <button 
                 onClick={() => setSelectedNote(null)}
@@ -23,7 +23,7 @@ const Dashboard: React.FC<DashboardProps> = ({ notes, onGenerateClick }) => {
                 ✕
               </button>
             </div>
-            <div className="p-6 space-y-4">
+            <div className="p-6 space-y-6">
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Patient</h3>
@@ -35,22 +35,22 @@ const Dashboard: React.FC<DashboardProps> = ({ notes, onGenerateClick }) => {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="bg-blue-50 p-4 rounded-lg border border-blue-100">
-                  <h4 className="font-bold text-xs text-blue-600 uppercase tracking-widest mb-2">Subjective</h4>
-                  <p className="text-sm text-slate-700 leading-relaxed">{selectedNote.subjective || 'N/A'}</p>
+              <div className="space-y-6">
+                <div className="bg-blue-50 p-6 rounded-lg border border-blue-100">
+                  <h4 className="font-bold text-xs text-blue-600 uppercase tracking-widest mb-3">Subjective</h4>
+                  <p className="text-base text-slate-700 leading-relaxed whitespace-pre-wrap break-words">{selectedNote.subjective || 'N/A'}</p>
                 </div>
-                <div className="bg-green-50 p-4 rounded-lg border border-green-100">
-                  <h4 className="font-bold text-xs text-green-600 uppercase tracking-widest mb-2">Objective</h4>
-                  <p className="text-sm text-slate-700 leading-relaxed">{selectedNote.objective || 'N/A'}</p>
+                <div className="bg-green-50 p-6 rounded-lg border border-green-100">
+                  <h4 className="font-bold text-xs text-green-600 uppercase tracking-widest mb-3">Objective</h4>
+                  <p className="text-base text-slate-700 leading-relaxed whitespace-pre-wrap break-words">{selectedNote.objective || 'N/A'}</p>
                 </div>
-                <div className="bg-amber-50 p-4 rounded-lg border border-amber-100">
-                  <h4 className="font-bold text-xs text-amber-600 uppercase tracking-widest mb-2">Assessment</h4>
-                  <p className="text-sm text-slate-700 leading-relaxed">{selectedNote.assessment || 'N/A'}</p>
+                <div className="bg-amber-50 p-6 rounded-lg border border-amber-100">
+                  <h4 className="font-bold text-xs text-amber-600 uppercase tracking-widest mb-3">Assessment</h4>
+                  <p className="text-base text-slate-700 leading-relaxed whitespace-pre-wrap break-words">{selectedNote.assessment || 'N/A'}</p>
                 </div>
-                <div className="bg-purple-50 p-4 rounded-lg border border-purple-100">
-                  <h4 className="font-bold text-xs text-purple-600 uppercase tracking-widest mb-2">Plan</h4>
-                  <p className="text-sm text-slate-700 leading-relaxed">{selectedNote.plan || 'N/A'}</p>
+                <div className="bg-purple-50 p-6 rounded-lg border border-purple-100">
+                  <h4 className="font-bold text-xs text-purple-600 uppercase tracking-widest mb-3">Plan</h4>
+                  <p className="text-base text-slate-700 leading-relaxed whitespace-pre-wrap break-words">{selectedNote.plan || 'N/A'}</p>
                 </div>
               </div>
 
@@ -95,30 +95,39 @@ const Dashboard: React.FC<DashboardProps> = ({ notes, onGenerateClick }) => {
         <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
           <div className="flex items-center justify-between mb-4">
             <div className="w-10 h-10 bg-teal-100 text-teal-600 rounded-lg flex items-center justify-center">
-              <i className="fas fa-shield-halved"></i>
+              <i className="fas fa-user-doctor"></i>
             </div>
           </div>
-          <h3 className="text-sm text-slate-500 font-medium">Data Compliance</h3>
-          <p className="text-2xl font-bold text-slate-900">HIPAA Secured</p>
+          <h3 className="text-sm text-slate-500 font-medium">Practitioners & Patients</h3>
+          <div className="mt-1 grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-2xl font-bold text-slate-900">{new Set(notes.map(n => n.doctorId).filter(Boolean)).size}</p>
+              <p className="text-xs text-slate-500">Practitioners</p>
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-slate-900">{new Set(notes.map(n => n.patientId).filter(Boolean)).size}</p>
+              <p className="text-xs text-slate-500">Patients</p>
+            </div>
+          </div>
         </div>
       </div>
 
       <div className="bg-blue-600 rounded-2xl p-8 text-white flex flex-col md:flex-row items-center justify-between gap-6 shadow-lg">
         <div>
           <h3 className="text-xl font-bold mb-2">Start a New Clinical Note</h3>
-          <p className="text-blue-100 max-w-md">Our hybrid AI combines semantic structuring with generative refinement to provide reliable, fact-checked SOAP notes.</p>
+          <p className="text-blue-100 max-w-md">Our hybrid system combines semantic structuring with generative refinement to provide reliable, fact-checked SOAP notes.</p>
         </div>
         <button 
           onClick={onGenerateClick}
           className="bg-white text-blue-600 px-6 py-3 rounded-lg font-bold hover:bg-blue-50 transition-all shadow-md whitespace-nowrap"
         >
-          <i className="fas fa-plus mr-2"></i> New Encounter
+          <i className="fas fa-plus mr-2"></i> New Finding
         </button>
       </div>
       
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="p-4 border-b border-slate-100 flex justify-between items-center">
-          <h3 className="font-bold text-slate-800">Recent Encounters</h3>
+          <h3 className="font-bold text-slate-800">Recent Notes</h3>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left">
