@@ -170,8 +170,6 @@ async function run() {
       console.log(`📡 Point your frontend API_BASE to this address.`);
     });
 
-    // Keep the server running
-    return new Promise(() => {});
   } catch (err) {
     console.error("❌ Failed to connect to MongoDB Atlas:", err);
     process.exit(1);

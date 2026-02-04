@@ -110,7 +110,7 @@ export const geminiService = {
       Refine the following clinical notes to be more professional, succinct, and shorter. 
       Ensure HIPAA-compliant style and medical precision. 
       DO NOT ADD NEW MEDICAL INFORMATION. Only improve clarity, brevity, and formatting.
-      Make the notes concise while retaining all critical medical information.
+      Make the notes concise while retaining all important medical information.
       
       Subjective: ${note.subjective}
       Objective: ${note.objective}
