@@ -38,7 +38,7 @@ const Chatbot: React.FC<ChatbotProps> = ({ history }) => {
     setIsLoading(true);
 
     try {
-      const response = await geminiService.queryNotes(input, history, authState.type === 'patient');
+      const response = await geminiService.queryNotes(input, history);
       setMessages(prev => [...prev, { role: 'assistant', content: response }]);
     } catch (e) {
       setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I encountered an error processing that query.' }]);

@@ -158,7 +158,7 @@ const App: React.FC = () => {
               <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
                 <div className="bg-white rounded-2xl shadow-xl max-w-4xl w-full max-h-[95vh] overflow-y-auto">
                   <div className="p-6 border-b border-slate-200 flex justify-between items-center sticky top-0 bg-white z-10">
-                    <h2 className="text-xl font-bold text-slate-800">Encounter Details</h2>
+                    <h2 className="text-xl font-bold text-slate-800">Finding Details</h2>
                     <button
                       onClick={() => setSelectedHistoryNote(null)}
                       className="text-slate-400 hover:text-slate-600 text-2xl"

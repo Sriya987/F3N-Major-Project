@@ -101,44 +101,167 @@ export const geminiService = {
     // Extract text directly from the .text property
     return JSON.parse(response.text || '{}');
   },
+  transcribeAudio: async (
+    dialogueAudio: { data: string; mimeType: string },
+    model: string = 'gemini-3-flash-preview'
+  ): Promise<string> => {
+    if (!dialogueAudio?.data) {
+      throw new Error("Audio data is required for transcription.");
+    }
 
+    const response = await ai.models.generateContent({
+      model,
+      contents: {
+        parts: [
+          {
+            text: `
+              Transcribe the provided clinical conversation audio accurately.
+              Rules:
+              1. Return only the transcript text.
+              2. Do not summarize.
+              3. Do not add information not present in the audio.
+              4. Preserve speaker meaning and medical terms as spoken.
+            `
+          },
+          {
+            inlineData: {
+              data: dialogueAudio.data,
+              mimeType: dialogueAudio.mimeType
+            }
+          }
+        ]
+      }
+    });
+
+    return (response.text || '').trim();
+  },
   /**
    * Polishes the text for professional clinical standards.
    */
-  refineSOAP: async (note: Partial<SOAPNote>): Promise<Partial<SOAPNote>> => {
-    const prompt = `
-      Refine the following clinical notes to be more professional, succinct, and shorter. 
-      Ensure HIPAA-compliant style and medical precision. 
-      DO NOT ADD NEW MEDICAL INFORMATION. Only improve clarity, brevity, and formatting.
-      Make the notes concise while retaining all important medical information.
+  // refineSOAP: async (note: Partial<SOAPNote>): Promise<Partial<SOAPNote>> => {
+  //   const prompt = `
+  //     Refine the following clinical notes to be more professional, succinct, and shorter. 
+  //     Ensure HIPAA-compliant style and medical precision. 
+  //     DO NOT ADD NEW MEDICAL INFORMATION. Only improve clarity, brevity, and formatting.
+  //     Make the notes concise while retaining all important medical information.
       
-      Subjective: ${note.subjective}
-      Objective: ${note.objective}
-      Assessment: ${note.assessment}
-      Plan: ${note.plan}
-    `;
+  //     Subjective: ${note.subjective}
+  //     Objective: ${note.objective}
+  //     Assessment: ${note.assessment}
+  //     Plan: ${note.plan}
+  //   `;
 
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-1.5-pro',
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: SOAP_SCHEMA
-        }
-      });
+  //   try {
+  //     const response = await ai.models.generateContent({
+  //       model: 'gemini-1.5-pro',
+  //       contents: prompt,
+  //       config: {
+  //         responseMimeType: "application/json",
+  //         responseSchema: SOAP_SCHEMA
+  //       }
+  //     });
 
-      // Extract text directly from the .text property
-      const result = JSON.parse(response.text || '{}');
-      console.log("Refinement successful:", result);
-      return result;
-    } catch (error: any) {
-      console.error("Refinement error details:", error);
-      // If refinement fails, return the original note
-      console.warn("Refinement failed, returning original note");
-      return note;
-    }
-  },
+  //     // Extract text directly from the .text property
+  //     const result = JSON.parse(response.text || '{}');
+  //     console.log("Refinement successful:", result);
+  //     return result;
+  //   } catch (error: any) {
+  //     console.error("Refinement error details:", error);
+  //     // If refinement fails, return the original note
+  //     console.warn("Refinement failed, returning original note");
+  //     return note;
+  //   }
+  // },
+
+  refineSOAP: async (note: Partial<SOAPNote>): Promise<Partial<SOAPNote>> => {
+
+  const clean = (text?: string) =>
+    (text || "")
+      .replace(/\bS:\s*/gi, "")
+      .replace(/\bO:\s*/gi, "")
+      .replace(/\bA:\s*/gi, "")
+      .replace(/\bP:\s*/gi, "")
+      .replace(/\n+/g, " ")
+      .trim();
+
+  const mergedText = `
+${clean(note.subjective)}
+${clean(note.objective)}
+${clean(note.assessment)}
+${clean(note.plan)}
+`;
+
+  const prompt = `
+You are a clinical documentation assistant.
+
+The following clinical statements were extracted from a doctor–patient conversation.
+They may contain duplicated or miscategorized information.
+
+Your task:
+
+1. Remove duplicated sentences.
+2. Assign each statement to the correct SOAP section.
+3. Do not repeat the same sentence in multiple sections.
+4. Use concise medical language.
+
+SOAP definitions:
+
+Subjective:
+Patient symptoms and reported history.
+
+Objective:
+Exam findings, vitals, lab results, imaging.
+
+Assessment:
+Clinical interpretation or diagnosis.
+
+Plan:
+Treatment, medications, follow-up instructions.
+
+Return JSON only:
+
+{
+ "subjective": "",
+ "objective": "",
+ "assessment": "",
+ "plan": ""
+}
+
+Clinical statements:
+${mergedText}
+`;
+  try {
+
+    const response = await ai.models.generateContent({
+      model: "gemini-1.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: SOAP_SCHEMA
+      }
+    });
+
+    const result = JSON.parse(response.text || "{}");
+
+    return {
+      subjective: result.subjective || "",
+      objective: result.objective || "",
+      assessment: result.assessment || "",
+      plan: result.plan || ""
+    };
+
+  } catch (err) {
+
+    console.error("SOAP refinement failed:", err);
+
+    return {
+      subjective: clean(note.subjective),
+      objective: clean(note.objective),
+      assessment: clean(note.assessment),
+      plan: clean(note.plan)
+    };
+  }
+},
 
   analyzeDifferences: async (flash: any, pro: any): Promise<string> => {
     const prompt = `

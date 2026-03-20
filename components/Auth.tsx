@@ -75,7 +75,7 @@ const Auth: React.FC<AuthProps> = ({ onLogin }) => {
           <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-4 text-2xl shadow-lg shadow-blue-500/30">
             <i className="fas fa-heart-pulse"></i>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight">ClinicalMind AI</h1>
+          <h1 className="text-2xl font-bold tracking-tight">F3N Hybrid AI</h1>
           <p className="text-slate-400 text-sm mt-1">Intelligent Healthcare Documentation</p>
         </div>
 
