@@ -5,6 +5,67 @@ import { SOAPNote } from "../types";
 // Always use the API key directly from process.env.API_KEY as per guidelines.
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
+// Free-tier friendly pacing: one Gemini request at a time with a small cooldown.
+const GEMINI_MIN_GAP_MS = 3500;
+let geminiQueue: Promise<void> = Promise.resolve();
+let lastGeminiCallAt = 0;
+
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const extractRetrySeconds = (message: string): number | null => {
+  const m = message.match(/retry\s+in\s+([0-9]+(?:\.[0-9]+)?)/i);
+  if (!m) return null;
+  const seconds = Math.ceil(Number(m[1]));
+  return Number.isFinite(seconds) ? seconds : null;
+};
+
+const executeGeminiWithinLimit = async <T>(fn: () => Promise<T>): Promise<T> => {
+  let release!: () => void;
+  const turn = new Promise<void>(resolve => {
+    release = resolve;
+  });
+
+  const previous = geminiQueue;
+  geminiQueue = geminiQueue.then(() => turn);
+
+  await previous;
+  try {
+    const now = Date.now();
+    const waitMs = Math.max(0, GEMINI_MIN_GAP_MS - (now - lastGeminiCallAt));
+    if (waitMs > 0) {
+      await wait(waitMs);
+    }
+
+    const result = await fn();
+    lastGeminiCallAt = Date.now();
+    return result;
+  } catch (err: any) {
+    const msg = String(err?.message || err || 'Gemini request failed');
+    const lower = msg.toLowerCase();
+    if (lower.includes('resource_exhausted') || lower.includes('quota') || lower.includes('429')) {
+      const retrySeconds = extractRetrySeconds(msg) ?? 60;
+      throw new Error(`Gemini free-tier limit reached. Please wait ${retrySeconds}s before sending another request.`);
+    }
+    throw err;
+  } finally {
+    release();
+  }
+};
+
+const responseCache = new Map<string, Promise<any>>();
+
+const getOrSetCached = <T>(key: string, producer: () => Promise<T>): Promise<T> => {
+  if (responseCache.has(key)) {
+    return responseCache.get(key) as Promise<T>;
+  }
+  const p = producer().finally(() => {
+    // Keep cache small and short-lived in memory.
+    setTimeout(() => responseCache.delete(key), 3 * 60 * 1000);
+  });
+  responseCache.set(key, p as Promise<any>);
+  return p;
+};
+
 const SOAP_SCHEMA = {
   type: Type.OBJECT,
   properties: {
@@ -34,14 +95,17 @@ export const geminiService = {
       2. Use medical terminology appropriately.
     `;
 
-    const response = await ai.models.generateContent({
-      model: model,
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: SOAP_SCHEMA
-      }
-    });
+    const cacheKey = `soap:${model}:${dialogue.length}:${context.length}`;
+    const response = await getOrSetCached(cacheKey, () =>
+      executeGeminiWithinLimit(() => ai.models.generateContent({
+        model: model,
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: SOAP_SCHEMA
+        }
+      }))
+    );
 
     // Extract text directly from the .text property
     return JSON.parse(response.text || '{}');
@@ -89,14 +153,19 @@ export const geminiService = {
       });
     }
 
-    const response = await ai.models.generateContent({
-      model: model,
-      contents: { parts },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: SOAP_SCHEMA
-      }
-    });
+    const audioSig = dialogueAudio?.data ? `${dialogueAudio.data.length}:${dialogueAudio.mimeType}` : 'no-audio';
+    const pdfSig = labPdf?.data ? `${labPdf.data.length}:${labPdf.mimeType}` : 'no-pdf';
+    const cacheKey = `multi:${model}:${audioSig}:${pdfSig}`;
+    const response = await getOrSetCached(cacheKey, () =>
+      executeGeminiWithinLimit(() => ai.models.generateContent({
+        model: model,
+        contents: { parts },
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: SOAP_SCHEMA
+        }
+      }))
+    );
 
     // Extract text directly from the .text property
     return JSON.parse(response.text || '{}');
@@ -109,34 +178,37 @@ export const geminiService = {
       throw new Error("Audio data is required for transcription.");
     }
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: {
-        parts: [
-          {
-            text: `
-              Transcribe the provided clinical conversation audio accurately.
-              Rules:
-              1. Return only the verbatim transcript text.
-              2. Do not summarize.
-              3. Do not add information not present in the audio.
-              4. Preserve speaker meaning and medical terms as spoken.
-              5. Do not mention instructions, prompts, or request metadata.
-              6. If speech is unclear, write exactly: [UNINTELLIGIBLE]
-            `
-          },
-          {
-            inlineData: {
-              data: dialogueAudio.data,
-              mimeType: dialogueAudio.mimeType
+    const cacheKey = `tx:${model}:${dialogueAudio.data.length}:${dialogueAudio.mimeType}`;
+    const response = await getOrSetCached(cacheKey, () =>
+      executeGeminiWithinLimit(() => ai.models.generateContent({
+        model,
+        contents: {
+          parts: [
+            {
+              text: `
+                Transcribe the provided clinical conversation audio accurately.
+                Rules:
+                1. Return only the verbatim transcript text.
+                2. Do not summarize.
+                3. Do not add information not present in the audio.
+                4. Preserve speaker meaning and medical terms as spoken.
+                5. Do not mention instructions, prompts, or request metadata.
+                6. If speech is unclear, write exactly: [UNINTELLIGIBLE]
+              `
+            },
+            {
+              inlineData: {
+                data: dialogueAudio.data,
+                mimeType: dialogueAudio.mimeType
+              }
             }
-          }
-        ]
-      },
-      config: {
-        temperature: 0
-      }
-    });
+          ]
+        },
+        config: {
+          temperature: 0
+        }
+      }))
+    );
 
     const transcript = (response.text || '').trim();
     const looksLikePromptLeak = /provide (the )?audio file|text you would like me to transcribe|transcribe the provided/i.test(transcript);
@@ -245,14 +317,14 @@ ${mergedText}
 `;
   try {
 
-    const response = await ai.models.generateContent({
+    const response = await executeGeminiWithinLimit(() => ai.models.generateContent({
       model: "gemini-1.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
         responseSchema: SOAP_SCHEMA
       }
-    });
+    }));
 
     const result = JSON.parse(response.text || "{}");
 
@@ -289,10 +361,10 @@ ${mergedText}
       Provide a brief expert summary.
     `;
 
-    const response = await ai.models.generateContent({
+    const response = await executeGeminiWithinLimit(() => ai.models.generateContent({
       model: 'gemini-3-pro-preview',
       contents: prompt
-    });
+    }));
 
     // Extract text directly from the .text property
     return response.text || "Analysis unavailable.";
@@ -308,10 +380,10 @@ ${mergedText}
       Query: ${query}
     `;
 
-    const response = await ai.models.generateContent({
+    const response = await executeGeminiWithinLimit(() => ai.models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: prompt
-    });
+    }));
 
     // Extract text directly from the .text property
     return response.text || "No relevant information found.";
