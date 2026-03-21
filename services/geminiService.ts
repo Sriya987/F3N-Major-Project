@@ -117,10 +117,12 @@ export const geminiService = {
             text: `
               Transcribe the provided clinical conversation audio accurately.
               Rules:
-              1. Return only the transcript text.
+              1. Return only the verbatim transcript text.
               2. Do not summarize.
               3. Do not add information not present in the audio.
               4. Preserve speaker meaning and medical terms as spoken.
+              5. Do not mention instructions, prompts, or request metadata.
+              6. If speech is unclear, write exactly: [UNINTELLIGIBLE]
             `
           },
           {
@@ -130,10 +132,21 @@ export const geminiService = {
             }
           }
         ]
+      },
+      config: {
+        temperature: 0
       }
     });
 
-    return (response.text || '').trim();
+    const transcript = (response.text || '').trim();
+    const looksLikePromptLeak = /provide (the )?audio file|text you would like me to transcribe|transcribe the provided/i.test(transcript);
+
+    if (!transcript || looksLikePromptLeak) {
+      console.error('Invalid transcription output:', transcript);
+      throw new Error('Transcription failed: audio could not be interpreted. Please upload a clearer audio file or record again.');
+    }
+
+    return transcript;
   },
   /**
    * Polishes the text for professional clinical standards.

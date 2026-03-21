@@ -76,56 +76,6 @@ const GenerateSOAP: React.FC<GenerateSOAPProps> = ({ onNoteGenerated }) => {
     setIsRecording(false);
   };
 
-  /* -------------------- AUDIO PREPROCESSING -------------------- */
-  /* Silence removal + normalization (browser-safe) */
-
-  const preprocessAudio = async (audioBlob: Blob): Promise<Blob> => {
-    const audioCtx = new AudioContext({ sampleRate: 16000 });
-    const buffer = await audioBlob.arrayBuffer();
-    const decoded = await audioCtx.decodeAudioData(buffer);
-    const data = decoded.getChannelData(0);
-
-    // Silence trimming
-    const threshold = 0.02;
-    let start = 0;
-    let end = data.length - 1;
-
-    while (start < end && Math.abs(data[start]) < threshold) start++;
-    while (end > start && Math.abs(data[end]) < threshold) end--;
-
-    const trimmed = data.slice(start, end);
-
-    // Normalization
-    let max = 0;
-    for (let i = 0; i < trimmed.length; i++) {
-      max = Math.max(max, Math.abs(trimmed[i]));
-    }
-
-    const normalized = max > 0 ? trimmed.map(v => v / max) : trimmed;
-
-    // Rebuild buffer
-    const processedBuffer = audioCtx.createBuffer(1, normalized.length, 16000);
-    processedBuffer.copyToChannel(new Float32Array(normalized), 0);
-    
-    // Convert back to audio using MediaRecorder
-    const destination = audioCtx.createMediaStreamDestination();
-    const source = audioCtx.createBufferSource();
-    source.buffer = processedBuffer;
-    source.connect(destination);
-    source.start();
-
-    const recorder = new MediaRecorder(destination.stream, { mimeType: 'audio/webm' });
-    const chunks: Blob[] = [];
-
-    recorder.ondataavailable = e => chunks.push(e.data);
-    recorder.start();
-    await new Promise(r => setTimeout(r, 300));
-    recorder.stop();
-    await new Promise(r => recorder.onstop = r);
-
-    return new Blob(chunks, { type: 'audio/webm' });
-  };
-
   /* -------------------- BASE64 -------------------- */
 
   const fileToBase64 = (file: File | Blob): Promise<string> =>
@@ -150,12 +100,13 @@ const GenerateSOAP: React.FC<GenerateSOAPProps> = ({ onNoteGenerated }) => {
       let labData;
 
       if (audioFile) {
-        const processedAudio = await preprocessAudio(audioFile);
+        const mimeType = audioFile.type || 'audio/webm';
         audioData = {
-          data: await fileToBase64(processedAudio),
-          mimeType: 'audio/webm',
+          data: await fileToBase64(audioFile),
+          mimeType,
           hint: "Preserve all patient-reported symptoms verbatim in Subjective"
         };
+        console.log('Audio payload prepared:', { mimeType, bytesBase64: audioData.data.length });
       }
 
       if (labFile) {
@@ -164,22 +115,22 @@ const GenerateSOAP: React.FC<GenerateSOAPProps> = ({ onNoteGenerated }) => {
           mimeType: 'application/pdf'
         };
       }
-      // console.log(audioData);
-      const transcript = await geminiService.transcribeAudio(audioData)
-      try {
-        const transcript = await geminiService.transcribeAudio(audioData)
-        console.log("Transcript:", transcript);
-      } catch (err) {
-        console.error("TRANSCRIPTION ERROR:", err);
+      if (!audioData) {
+        if (!labData) {
+          throw new Error("Audio or lab report is required to generate SOAP note.");
+        }
       }
-      console.log("Transcript:", transcript);
-    // const rawSOAP = await flanSoapService.generateSOAP(transcript)
-    const rawSOAP1 = await flanSoapService.generateSOAP(transcript);
 
-    const rawSOAPString = JSON.stringify(rawSOAP1);
-    const rawSOAP = parseSOAPString(rawSOAPString);
+      let rawSOAP;
 
-    setPreviewNote(rawSOAP);
+      if (labData) {
+        console.log("Using multimodal Gemini path (audio + lab PDF) for SOAP extraction.");
+        rawSOAP = await geminiService.generateSOAPMultimodal(audioData, labData);
+      } else {
+        const transcript = await geminiService.transcribeAudio(audioData);
+        console.log("Transcript:", transcript);
+        rawSOAP = await flanSoapService.generateSOAP(transcript);
+      }
 
     // normalize structure before preview
     const normalizedSOAP = {
@@ -192,76 +143,34 @@ const GenerateSOAP: React.FC<GenerateSOAPProps> = ({ onNoteGenerated }) => {
     setPreviewNote(normalizedSOAP)
     setStep(2)
     } catch (err: any) {
-      alert(err?.message || "Processing failed");
+      const msg = String(err?.message || "Processing failed");
+      const friendly = msg.toLowerCase().includes("failed to fetch")
+        ? "Cannot reach backend service. Please ensure server and uvicorn are running."
+        : msg;
+      alert(friendly);
     } finally {
       setIsLoading(false);
     }
   };
-
-  /* -------------------- CONTROLLED REFINEMENT -------------------- */
-  const parseSOAPString = (text: string) => {
-  const sections = {
-    subjective: "",
-    objective: "",
-    assessment: "",
-    plan: ""
-  };
-
-  const regex = /([SOAP]):\s*([\s\S]*?)(?=\s*[SOAP]:|$)/gi;
-
-  let match;
-
-  while ((match = regex.exec(text)) !== null) {
-    const label = match[1].toUpperCase();
-    const content = match[2].trim();
-
-    if (label === "S") sections.subjective = content;
-    if (label === "O") sections.objective = content;
-    if (label === "A") sections.assessment = content;
-    if (label === "P") sections.plan = content;
-  }
-
-  return {
-    subjective: sections.subjective || "Not reported",
-    objective: sections.objective || "Not reported",
-    assessment: sections.assessment || "Not reported",
-    plan: sections.plan || "Not reported"
-  };
-};
 
   const handleControlledRefinement = async () => {
     if (!previewNote || !selectedPatient) return;
 
     setIsLoading(true);
     try {
-        const rawText = `
-        Subjective:
-        ${previewNote.subjective}
-
-        Objective:
-        ${previewNote.objective}
-
-        Assessment:
-        ${previewNote.assessment}
-
-        Plan:
-        ${previewNote.plan}
-        `
-
-      const refined = await geminiService.refineSOAP(previewNote);
       const finalNote: SOAPNote = {
         id: Math.random().toString(36).substr(2, 9),
         patientId: selectedPatient.id,
         patientName: selectedPatient.name,
         doctorId: 'DR001',
         date: new Date().toLocaleDateString(),
-        subjective: refined.subjective || '',
-        objective: refined.objective || '',
-        assessment: refined.assessment || '',
-        plan: refined.plan || '',
-        rawDialogue: "[Audio Preprocessed]",
+        subjective: previewNote.subjective || '',
+        objective: previewNote.objective || '',
+        assessment: previewNote.assessment || '',
+        plan: previewNote.plan || '',
+        rawDialogue: "[Transcript captured and logged]",
         rawLabData: "[PDF Processed]",
-        modelUsed: 'Hybrid (Preprocessed Multimodal)',
+        modelUsed: 'Gemini (transcript) + FLAN-T5',
         timestamp: Date.now()
       };
 
@@ -396,7 +305,7 @@ const GenerateSOAP: React.FC<GenerateSOAPProps> = ({ onNoteGenerated }) => {
           </div>
           <div className="flex gap-4">
             <button onClick={() => setStep(1)} className="flex-1 bg-slate-100 py-4 rounded-2xl font-bold">Back</button>
-            <button onClick={handleControlledRefinement} className="flex-1 bg-blue-600 text-white py-4 rounded-2xl font-bold">Finalize & Refine</button>
+            <button onClick={handleControlledRefinement} className="flex-1 bg-blue-600 text-white py-4 rounded-2xl font-bold">Finalize Note</button>
           </div>
         </div>
       )}
