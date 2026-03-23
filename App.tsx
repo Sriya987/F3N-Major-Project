@@ -43,10 +43,12 @@ const App: React.FC = () => {
 
   const fetchNotes = async () => {
     if (!authState.user) return;
-    
-    // If patient, only fetch their notes
-    const patientId = authState.type === 'patient' ? authState.user.id : undefined;
-    const data = await dbService.getNotes(patientId);
+
+    const scope = authState.type === 'patient'
+      ? { patientId: authState.user.id }
+      : { doctorId: authState.user.id };
+
+    const data = await dbService.getNotes(scope);
     setNotes(data.sort((a, b) => b.timestamp - a.timestamp));
   };
 

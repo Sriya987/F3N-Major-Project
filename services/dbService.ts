@@ -3,6 +3,11 @@ import { SOAPNote, Patient, Doctor, UserType } from '../types';
 
 const API_BASE = 'http://localhost:3001/api';
 
+type NoteScope = {
+  patientId?: string;
+  doctorId?: string;
+};
+
 export const dbService = {
   // Utility to check if backend is alive
   checkConnection: async (): Promise<boolean> => {
@@ -44,8 +49,12 @@ export const dbService = {
   },
 
   // NOTES
-  getNotes: async (patientId?: string): Promise<SOAPNote[]> => {
-    const url = patientId ? `${API_BASE}/notes?patientId=${patientId}` : `${API_BASE}/notes`;
+  getNotes: async (scope?: string | NoteScope): Promise<SOAPNote[]> => {
+    const normalizedScope: NoteScope = typeof scope === 'string' ? { patientId: scope } : (scope || {});
+    const query = new URLSearchParams();
+    if (normalizedScope.patientId) query.set('patientId', normalizedScope.patientId);
+    if (normalizedScope.doctorId) query.set('doctorId', normalizedScope.doctorId);
+    const url = query.toString() ? `${API_BASE}/notes?${query.toString()}` : `${API_BASE}/notes`;
     try {
       const response = await fetch(url);
       if (!response.ok) throw new Error('Failed to fetch from remote');
@@ -54,7 +63,11 @@ export const dbService = {
       console.warn('Backend unreachable, attempting local storage fallback.');
       const data = localStorage.getItem('clinical_mind_records');
       const all: SOAPNote[] = data ? JSON.parse(data) : [];
-      return patientId ? all.filter(n => n.patientId === patientId) : all;
+      return all.filter(n => {
+        if (normalizedScope.patientId && n.patientId !== normalizedScope.patientId) return false;
+        if (normalizedScope.doctorId && n.doctorId !== normalizedScope.doctorId) return false;
+        return true;
+      });
     }
   },
 

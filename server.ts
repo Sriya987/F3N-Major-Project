@@ -49,6 +49,35 @@ app.post('/api/ollama/generate', async (req, res) => {
   }
 });
 
+// OLLAMA EMBEDDINGS PROXY
+app.post('/api/ollama/embeddings', async (req, res) => {
+  try {
+    const { input, model = 'nomic-embed-text:latest' } = req.body;
+
+    if (!input || typeof input !== 'string') {
+      return res.status(400).json({ error: 'input text is required' });
+    }
+
+    const embedResponse = await fetch('http://localhost:11434/api/embeddings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, prompt: input })
+    });
+
+    if (!embedResponse.ok) {
+      const error = await embedResponse.text();
+      console.error('Ollama embeddings error:', error);
+      return res.status(500).json({ error: `Ollama embeddings failed: ${error}` });
+    }
+
+    const data = await embedResponse.json();
+    return res.json({ embedding: data.embedding || [] });
+  } catch (err: any) {
+    console.error('Ollama embeddings proxy error:', err);
+    return res.status(500).json({ error: err.message || 'Ollama embeddings connection failed' });
+  }
+});
+
 // Get MongoDB URI from environment variable
 const uri = process.env.MONGODB_URI ;
 
@@ -117,8 +146,10 @@ async function run() {
 
     // NOTES ENDPOINTS
     app.get('/api/notes', async (req, res) => {
-      const { patientId } = req.query;
-      const filter = patientId ? { patientId } : {};
+      const { patientId, doctorId } = req.query;
+      const filter: any = {};
+      if (patientId) filter.patientId = patientId;
+      if (doctorId) filter.doctorId = doctorId;
       const notes = await notesCollection.find(filter).sort({ timestamp: -1 }).toArray();
       res.json(notes);
     });
