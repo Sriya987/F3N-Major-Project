@@ -1,4 +1,5 @@
 
+
 import React, { useState, useRef, useEffect } from 'react';
 import { dbService } from '../services/dbService';
 import { SOAPNote, ChatMessage, AuthState } from '../types';
@@ -20,7 +21,7 @@ type EmbeddingResult = {
 
 const EMBEDDING_DIM = 128;
 
-const RAW_API_BASE = ((import.meta as any)?.env?.VITE_API_BASE || 'http://localhost:3001').replace(/\/$/, '');
+const RAW_API_BASE = ((import.meta as any)?.env?.VITE_API_BASE || 'http://localhost:5000').replace(/\/$/, '');
 const API_ROOT = RAW_API_BASE.replace(/\/api$/i, '');
 
 const noteToText = (note: SOAPNote) =>
@@ -90,9 +91,45 @@ const fetchEmbedding = async (text: string): Promise<EmbeddingResult> => {
   }
 };
 
-const askRagModel = async (question: string, contexts: string[]): Promise<string> => {
-  const prompt = `Answer briefly based only on the context.\nIf the context is insufficient, say "I don't have enough information".\n\nContext:\n${contexts.join('\n\n')}\n\nQuestion:\n${question}`;
+const extractPatientName = (query: string, notes: SOAPNote[]): string | null => {
+  const q = query.toLowerCase();
 
+  for (const n of notes) {
+    const name = n.patientName.toLowerCase();
+
+    if (q.includes(name)) return n.patientName;
+
+    const first = name.split(' ')[0];
+    if (q.includes(first)) return n.patientName;
+  }
+
+  return null;
+};
+
+const askRagModel = async (question: string, contexts: string[]): Promise<string> => {
+const prompt = `
+You are a strict medical assistant.
+
+Rules:
+- Use ONLY the given context
+- NEVER mix data from different patients
+- If patient not found → say: "Patient information not available."
+- If answer not present → say: "I don't have enough information"
+
+- If user asks for:
+  plan → return ONLY Plan
+  diagnosis/assessment → ONLY Assessment
+  symptoms → ONLY Subjective
+  vitals/exam → ONLY Objective
+
+Context:
+${contexts.join('\n\n')}
+
+Question:
+${question}
+
+Answer:
+`;
   const response = await fetch(`${API_ROOT}/api/ollama/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -121,9 +158,11 @@ const buildLocalFallbackAnswer = (question: string, notes: SOAPNote[]): string =
   if (!notes.length) return "I don't have enough information";
 
   const q = question.toLowerCase();
-  const statusIntent = /health|status|condition|how is|how's|diagnosis|follow-?up/i.test(q);
 
-  const patientMatched = notes.filter(n => q.includes((n.patientName || '').toLowerCase()));
+  const patientMatched = notes.filter(n =>
+    q.includes((n.patientName || '').toLowerCase())
+  );
+
   const candidates = (patientMatched.length ? patientMatched : notes)
     .slice()
     .sort((a, b) => b.timestamp - a.timestamp);
@@ -131,13 +170,25 @@ const buildLocalFallbackAnswer = (question: string, notes: SOAPNote[]): string =
   const note = candidates[0];
   if (!note) return "I don't have enough information";
 
-  if (statusIntent) {
-    const assessment = note.assessment || 'Not reported';
-    const plan = note.plan || 'Not reported';
-    return `Latest status for ${note.patientName} (${note.date}): Assessment: ${assessment}. Plan: ${plan}.`;
+  // 🔍 Intent detection
+  if (/plan|treatment/i.test(q)) {
+    return `Plan for ${note.patientName} (${note.date}): ${note.plan || 'Not reported'}.`;
   }
 
-  return `Most relevant record for ${note.patientName} (${note.date}): Subjective: ${note.subjective || 'Not reported'}. Assessment: ${note.assessment || 'Not reported'}.`;
+  if (/diagnosis|assessment/i.test(q)) {
+    return `Assessment for ${note.patientName} (${note.date}): ${note.assessment || 'Not reported'}.`;
+  }
+
+  if (/subjective|symptoms/i.test(q)) {
+    return `Subjective for ${note.patientName} (${note.date}): ${note.subjective || 'Not reported'}.`;
+  }
+
+  if (/objective|vitals|exam/i.test(q)) {
+    return `Objective for ${note.patientName} (${note.date}): ${note.objective || 'Not reported'}.`;
+  }
+
+  // Default summary
+  return `Summary for ${note.patientName} (${note.date}): Assessment: ${note.assessment || 'Not reported'}. Plan: ${note.plan || 'Not reported'}.`;
 };
 
 const getNotesFingerprint = (notes: SOAPNote[]) =>
@@ -263,73 +314,115 @@ const Chatbot: React.FC<ChatbotProps> = ({ history }) => {
   }, [messages]);
 
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return;
+  if (!input.trim() || isLoading) return;
 
-    const userInput = input.trim();
-    
-    const userMsg: ChatMessage = { role: 'user', content: userInput };
-    setMessages(prev => [...prev, userMsg]);
-    setInput('');
-    setIsLoading(true);
+  const userInput = input.trim();
+  const patientName = extractPatientName(userInput, scopedHistory);
 
-    try {
-      if (/^(hi|hello|hey|hii|helo)\b/i.test(userInput)) {
-        const greeting = authState.type === 'doctor'
-          ? 'Hello Doctor. Ask about any patient SOAP summary, diagnosis trends, or follow-up plans.'
-          : 'Hello. Ask me anything about your notes, diagnosis summaries, or treatment plans.';
-        setMessages(prev => [...prev, { role: 'assistant', content: greeting }]);
+  const userMsg: ChatMessage = { role: 'user', content: userInput };
+  setMessages(prev => [...prev, userMsg]);
+  setInput('');
+  setIsLoading(true);
+
+  try {
+    // ✅ STEP 1: start with all notes
+    let filteredNotes = scopedHistory;
+
+    // ✅ STEP 2: filter by patient if mentioned
+    if (patientName) {
+      filteredNotes = scopedHistory.filter(
+        n => n.patientName.toLowerCase() === patientName.toLowerCase()
+      );
+
+      if (filteredNotes.length === 0) {
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: "Patient information not available." }
+        ]);
         return;
       }
-
-      let contexts: string[] = [];
-      let candidateNotes: SOAPNote[] = [];
-      if (embeddings.length > 0) {
-        try {
-          const queryEmbedding = await fetchEmbedding(userInput);
-          const queryVector = queryEmbedding.vector;
-          const ranked = embeddings
-            .map(e => ({
-              note: scopedHistory.find(n => n.id === e.noteId),
-              text: e.text,
-              score: cosineSim(queryVector, e.vector)
-            }))
-            .filter(item => !!item.note && item.text)
-            .sort((a, b) => b.score - a.score)
-            .slice(0, 3);
-          contexts = ranked.map(item => item.text);
-          candidateNotes = ranked.map(item => item.note as SOAPNote);
-        } catch {
-          // Keep fallback below.
-        }
-      }
-
-      // Always fallback to latest records when index is missing/stale/unavailable.
-      if (contexts.length === 0) {
-        const latest = scopedHistory.slice(0, 3);
-        contexts = latest.map(noteToText);
-        candidateNotes = latest;
-      }
-
-      if (contexts.length === 0) {
-        setMessages(prev => [...prev, { role: 'assistant', content: "I don't have enough information" }]);
-        return;
-      }
-
-      let response = '';
-      try {
-        response = await askRagModel(userInput, contexts);
-      } catch (ragError) {
-        console.error('RAG generation failed, using local fallback:', ragError);
-        response = buildLocalFallbackAnswer(userInput, candidateNotes);
-      }
-      setMessages(prev => [...prev, { role: 'assistant', content: response }]);
-    } catch (e) {
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I encountered an error processing that query.' }]);
-    } finally {
-      setIsLoading(false);
     }
-  };
 
+    // ✅ STEP 3: doctor restriction
+    const isGeneralQuery = /all|list|recent|latest|summary|patients/i.test(userInput);
+
+    if (!patientName && authState.type === 'doctor' && !isGeneralQuery) {
+      if (filteredNotes.length !== 1) {
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: "Please specify a patient name." }
+        ]);
+        return;
+      }
+    }
+
+    // ✅ STEP 4: greeting shortcut
+    if (/^(hi|hello|hey)\b/i.test(userInput)) {
+      const greeting = authState.type === 'doctor'
+        ? 'Hello Doctor. Ask about any patient SOAP summary, diagnosis trends, or follow-up plans.'
+        : 'Hello. Ask me anything about your notes, diagnosis summaries, or treatment plans.';
+      
+      setMessages(prev => [...prev, { role: 'assistant', content: greeting }]);
+      return;
+    }
+
+    // ✅ STEP 5: build context
+    let contexts: string[] = [];
+    let candidateNotes: SOAPNote[] = [];
+
+    if (embeddings.length > 0) {
+      try {
+        const queryEmbedding = await fetchEmbedding(userInput);
+
+        const ranked = embeddings
+          .filter(e => filteredNotes.some(n => n.id === e.noteId))
+          .map(e => ({
+            note: scopedHistory.find(n => n.id === e.noteId),
+            text: e.text,
+            score: cosineSim(queryEmbedding.vector, e.vector)
+          }))
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 3);
+
+        contexts = ranked.map(r => r.text);
+        candidateNotes = ranked.map(r => r.note as SOAPNote);
+      } catch {}
+    }
+
+    // ✅ fallback
+    if (contexts.length === 0) {
+      const latest = filteredNotes.slice(0, 3);
+      contexts = latest.map(noteToText);
+      candidateNotes = latest;
+    }
+
+    if (contexts.length === 0) {
+      setMessages(prev => [
+        ...prev,
+        { role: 'assistant', content: "I don't have enough information" }
+      ]);
+      return;
+    }
+
+    // ✅ STEP 6: RAG call
+    let response = '';
+    try {
+      response = await askRagModel(userInput, contexts);
+    } catch {
+      response = buildLocalFallbackAnswer(userInput, candidateNotes);
+    }
+
+    setMessages(prev => [...prev, { role: 'assistant', content: response }]);
+
+  } catch {
+    setMessages(prev => [
+      ...prev,
+      { role: 'assistant', content: 'Error processing query.' }
+    ]);
+  } finally {
+    setIsLoading(false);
+  }
+};
   return (
     <div className="flex flex-col h-[calc(100vh-12rem)] bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden animate-fadeIn">
       <div className="bg-slate-50 p-4 border-b border-slate-200">

@@ -8,10 +8,94 @@ from peft import PeftModel
 from fastapi.middleware.cors import CORSMiddleware
 from nltk.tokenize import sent_tokenize
 import nltk
+import fitz
+import pytesseract
+from pdf2image import convert_from_path
+from transformers import pipeline
+
+
+# -----------------------------
+# LAB REPORT PROCESSING
+# -----------------------------
+def extract_text(pdf_path):
+    text = ""
+
+    try:
+        doc = fitz.open(pdf_path)
+        for page in doc:
+            text += page.get_text()
+    except:
+        pass
+
+    if len(text.strip()) < 100:
+        images = convert_from_path(pdf_path)
+        for img in images:
+            text += pytesseract.image_to_string(img)
+
+    text = re.sub(r'\s+', ' ', text)
+    return text
+
+
+lab_ner = pipeline(
+    "ner",
+    model="d4data/biomedical-ner-all",
+    aggregation_strategy="simple"
+)
+
+print("✅ NER model loaded successfully")   # ✅ CHECK 6
+print("NER Pipeline Type:", type(lab_ner))
+
+
+def extract_lab_results(text):
+    print("\n🔍 Running NER on text...\n")   # ✅ CHECK 1
+
+    entities = lab_ner(text)
+
+    print("🧠 NER Output Sample:", entities[:5])   # ✅ CHECK 2
+
+    value_matches = list(re.finditer(
+        r"(\d+(?:\.\d+)?)\s*(mg/dl|g/dl|mmol/l|%|mm)?",
+        text,
+        re.IGNORECASE
+    ))
+
+    results = {}
+
+    for ent in entities:
+        test_name = ent['word'].strip().upper()
+
+        if not re.search(r'[A-Z]', test_name):
+            continue
+
+        ent_end = ent['end']
+        closest_value = None
+
+        for vm in value_matches:
+            if vm.start() >= ent_end:
+                closest_value = vm.group(0).strip()
+                break
+
+        if closest_value:
+            results[test_name] = closest_value
+
+    print("✅ Extracted Lab Results:", results)   # ✅ CHECK 3
+
+    return results
+
+
+def lab_results_to_text(lab_results):
+    if not lab_results:
+        return "Not reported"
+
+    return " ".join([f"{k} is {v}." for k, v in lab_results.items()])
 
 nltk.download('punkt')
 
 app = FastAPI()
+
+@app.post("/generate-soap")
+async def generate_soap(data: ConversationInput):
+    print("🔥 FASTAPI HIT")   # ADD THIS
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,6 +126,7 @@ model.eval()
 
 class ConversationInput(BaseModel):
     conversation: str
+    lab_pdf_path: str | None = None
 
 
 # -----------------------------
@@ -329,7 +414,12 @@ def sanitize_sections(sections, conversation):
     cleaned = dict(sections)
     patient_text = extract_patient_text(conversation)
     cleaned["subjective"] = keep_supported_sentences(cleaned.get("subjective", ""), patient_text)
-    cleaned["objective"] = extract_objective_from_conversation(conversation)
+    conv_obj = extract_objective_from_conversation(conversation)
+    lab_obj = lab_results_to_text(lab_results)
+
+    combined_obj = f"{conv_obj} {lab_obj}".strip()
+
+    cleaned["objective"] = normalize_section(combined_obj)
     cleaned["assessment"] = strip_disallowed_assessment_content(cleaned.get("assessment", ""), conversation)
     cleaned["assessment"] = keep_supported_sentences(cleaned.get("assessment", ""), patient_text)
     cleaned["plan"] = sanitize_plan_section(cleaned.get("plan", ""))
@@ -491,62 +581,88 @@ def apply_fallback_if_sparse(sections, conversation):
     return merged
 
 
+def convert_to_bullets(text):
+    if not text or text == "Not reported":
+        return ["Not reported"]
+
+    sentences = [s.strip() for s in sent_tokenize(text) if s.strip()]
+    return sentences
 # -----------------------------
 # MAIN GENERATION FUNCTION
 # -----------------------------
-def generate_soap_note(conversation):
+def generate_soap_note(conversation, lab_pdf_path=None):
+    lab_results = {}
+
+    if lab_pdf_path:
+        try:
+            lab_text_raw = extract_text(lab_pdf_path)
+            lab_results = extract_lab_results(lab_text_raw)
+        except Exception as e:
+            print("Lab processing error:", e)
+
+    lab_text = lab_results_to_text(lab_results)
 
     prompt = f"""
-Generate a strictly factual SOAP note.
+    Generate a strictly factual SOAP note.
 
-RULES:
-- Use ONLY information from the conversation
-- DO NOT add medical assumptions
-- DO NOT include differential diagnosis
-- If not mentioned, write "Not reported"
-- Be concise and factual
-- If a clinician asks checklist questions and patient does not explicitly confirm a symptom, do not include it as a finding
-- Do not invent physical exam, vitals, labs, imaging, or treatment plan when absent
-- Remove conversational fillers (e.g., um/uh/yeah) from output wording
-- Do not copy clinician question stems as findings
-- Prefer concise clinical phrasing over verbatim transcript style
+    RULES:
+    - Use ONLY information from the conversation
+    - DO NOT add medical assumptions
+    - DO NOT include differential diagnosis
+    - If not mentioned, write "Not reported"
+    - Be concise and factual
+    - If a clinician asks checklist questions and patient does not explicitly confirm a symptom, do not include it as a finding
+    - Do not invent physical exam, vitals, labs, imaging, or treatment plan when absent
+    - Remove conversational fillers (e.g., um/uh/yeah) from output wording
+    - Do not copy clinician question stems as findings
+    - Prefer concise clinical phrasing over verbatim transcript style
 
-Format:
-Subjective:
-Objective:
-Assessment:
-Plan:
+    Format:
+    Subjective:
+    Objective:
+    Assessment:
+    Plan:
 
-Conversation:
-{conversation}
+    Conversation:
+    {conversation}
 
-SOAP Note:
-"""
+    Lab Findings:
+    {lab_text}
+
+    SOAP Note:
+    """
 
     inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=1024
-    ).to(device)
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=1024
+        ).to(device)
 
     with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=180,
-            num_beams=1,
-            do_sample=False,
-            length_penalty=1.0,
-            no_repeat_ngram_size=3,
-            early_stopping=True
-        )
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=180,
+                num_beams=1,
+                do_sample=False,
+                length_penalty=1.0,
+                no_repeat_ngram_size=3,
+                early_stopping=True
+            )
 
-    result = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        result = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-    parsed = parse_soap_sections(result)
-    evidence_clean = enforce_evidence_rules(conversation, parsed)
-    sanitized = sanitize_sections(evidence_clean, conversation)
-    return apply_fallback_if_sparse(sanitized, conversation)
+        parsed = parse_soap_sections(result)
+        evidence_clean = enforce_evidence_rules(conversation, parsed)
+        sanitized = sanitize_sections(evidence_clean, conversation)
+        
+
+    # Inject lab into objective AFTER sanitization
+    if lab_results:
+        conv_obj = sanitized.get("objective", "")
+        lab_obj = lab_results_to_text(lab_results)
+        sanitized["objective"] = normalize_section(f"{conv_obj} {lab_obj}")
+        return apply_fallback_if_sparse(sanitized, conversation)
 
 
 # -----------------------------
@@ -558,8 +674,16 @@ async def generate_soap(data: ConversationInput):
     preview = (data.conversation or "").strip()
     print("[TRANSCRIPT]", preview if len(preview) <= 1200 else f"{preview[:1200]}... [truncated]")
 
-    soap_note = generate_soap_note(data.conversation)
+    soap_note = generate_soap_note(
+    data.conversation,
+    data.lab_pdf_path
+)
 
     return {
-        "soap_note": soap_note
+    "soap_note": {
+        "subjective": convert_to_bullets(soap_note["subjective"]),
+        "objective": convert_to_bullets(soap_note["objective"]),
+        "assessment": convert_to_bullets(soap_note["assessment"]),
+        "plan": convert_to_bullets(soap_note["plan"]),
     }
+}
