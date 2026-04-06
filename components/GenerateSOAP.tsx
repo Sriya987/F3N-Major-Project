@@ -3,6 +3,7 @@ import { geminiService } from '../services/geminiService';
 import { flanSoapService } from '../services/flanSoapService';
 import { dbService } from '../services/dbService';
 import { SOAPNote, Patient } from '../types';
+import { modelRouterService } from '../services/modelRouterService';
 
 interface GenerateSOAPProps {
   onNoteGenerated: (note: SOAPNote) => void;
@@ -33,17 +34,24 @@ const GenerateSOAP: React.FC<GenerateSOAPProps> = ({ onNoteGenerated }) => {
 
   /* -------------------- RECORDING TIMER -------------------- */
 
-  useEffect(() => {
-    if (isRecording) {
-      timerRef.current = window.setInterval(() => {
-        setRecordingTime(t => t + 1);
-      }, 1000);
-    } else {
-      if (timerRef.current) clearInterval(timerRef.current);
-      setRecordingTime(0);
+useEffect(() => {
+  if (isRecording) {
+    timerRef.current = window.setInterval(() => {
+      setRecordingTime(t => t + 1);
+    }, 1000);
+  } else {
+    if (timerRef.current) clearInterval(timerRef.current);
+    setRecordingTime(0);
+  }
+
+  // Cleanup function must return void
+  return () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null; // optional, to reset
     }
-    return () => timerRef.current && clearInterval(timerRef.current);
-  }, [isRecording]);
+  };
+}, [isRecording]);
 
   /* -------------------- AUDIO RECORDING -------------------- */
 
@@ -88,70 +96,98 @@ const GenerateSOAP: React.FC<GenerateSOAPProps> = ({ onNoteGenerated }) => {
 
   /* -------------------- MULTIMODAL PROCESS -------------------- */
 
-  const handleMultimodalProcess = async () => {
-    if (!selectedPatient) {
-      alert("Please select a patient.");
-      return;
+const handleMultimodalProcess = async () => {
+  console.log("🚀 [STAGE 1] Process started");
+
+  if (!selectedPatient) {
+    alert("Please select a patient.");
+    return;
+  }
+
+  if (!audioFile) {
+    alert("Audio is required");
+    return;
+  }
+
+  setIsLoading(true);
+
+  try {
+    /* -------------------- STEP 1: TRANSCRIBE -------------------- */
+    console.log("🎤 [STAGE 2] Sending audio to Whisper backend");
+
+    const formData = new FormData();
+    formData.append("audio", audioFile);
+
+    console.time("TRANSCRIPTION");
+    console.log("Almost sent to")
+    const res = await fetch("http://127.0.0.1:8000/transcribe", {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!res.ok) throw new Error("Transcription failed");
+
+    const data = await res.json();
+    const transcript = data.transcript;
+    console.timeEnd("TRANSCRIPTION");
+
+    console.log("✅ Transcript:", transcript);
+
+    /* -------------------- STEP 2: PREPARE SOAP REQUEST -------------------- */
+
+    console.log("📦 [STAGE 3] Preparing SOAP request");
+
+    const soapFormData = new FormData();
+    soapFormData.append("conversation", transcript);
+
+    // ✅ send lab file if exists
+    if (labFile) {
+      console.log("📄 Attaching lab file");
+      soapFormData.append("lab_file", labFile);
     }
 
-    setIsLoading(true);
-    try {
-      let audioData;
-      let labData;
+    /* -------------------- STEP 3: CALL BACKEND SOAP -------------------- */
 
-      if (audioFile) {
-        const mimeType = audioFile.type || 'audio/webm';
-        audioData = {
-          data: await fileToBase64(audioFile),
-          mimeType,
-          hint: "Preserve all patient-reported symptoms verbatim in Subjective"
-        };
-        console.log('Audio payload prepared:', { mimeType, bytesBase64: audioData.data.length });
-      }
+    console.log("🤖 [STAGE 4] Calling SOAP API");
 
-      if (labFile) {
-        labData = {
-          data: await fileToBase64(labFile),
-          mimeType: 'application/pdf'
-        };
-      }
-      if (!audioData) {
-        if (!labData) {
-          throw new Error("Audio or lab report is required to generate SOAP note.");
-        }
-      }
+    console.time("SOAP_API");
+    const soapRes = await fetch("http://127.0.0.1:8000/generate-soap", {
+      method: "POST",
+      body: soapFormData,
+    });
 
-      let rawSOAP;
+    if (!soapRes.ok) throw new Error("SOAP generation failed");
 
-      if (labData) {
-        console.log("Using multimodal Gemini path (audio + lab PDF) for SOAP extraction.");
-        rawSOAP = await geminiService.generateSOAPMultimodal(audioData, labData);
-      } else {
-        const transcript = await geminiService.transcribeAudio(audioData);
-        console.log("Transcript:", transcript);
-        rawSOAP = await flanSoapService.generateSOAP(transcript);
-      }
+    const result = await soapRes.json();
+    console.timeEnd("SOAP_API");
 
-    // normalize structure before preview
+    console.log("✅ SOAP response received", result);
+
+    /* -------------------- STEP 4: NORMALIZE -------------------- */
+
+    const rawSOAP = result.soap_note;
+
     const normalizedSOAP = {
-      subjective: rawSOAP.subjective || "",
-      objective: rawSOAP.objective || "",
-      assessment: rawSOAP.assessment || "",
-      plan: rawSOAP.plan || ""
-    }
+      subjective: rawSOAP?.subjective || "",
+      objective: rawSOAP?.objective || "",
+      assessment: rawSOAP?.assessment || "",
+      plan: rawSOAP?.plan || ""
+    };
 
-    setPreviewNote(normalizedSOAP)
-    setStep(2)
-    } catch (err: any) {
-      const msg = String(err?.message || "Processing failed");
-      const friendly = msg.toLowerCase().includes("failed to fetch")
-        ? "Cannot reach backend service. Please ensure server and uvicorn are running."
-        : msg;
-      alert(friendly);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    /* -------------------- STEP 5: UI UPDATE -------------------- */
+
+    setPreviewNote(normalizedSOAP);
+    setStep(2);
+
+    console.log("🎉 Pipeline complete");
+
+  } catch (err: any) {
+    console.error("💥 ERROR:", err);
+    alert(err?.message || "Processing failed");
+  } finally {
+    setIsLoading(false);
+  }
+};
 
   const handleControlledRefinement = async () => {
     if (!previewNote || !selectedPatient) return;

@@ -93,9 +93,6 @@ nltk.download('punkt')
 
 app = FastAPI()
 
-@app.post("/generate-soap")
-async def generate_soap(data: ConversationInput):
-    print("🔥 FASTAPI HIT")   # ADD THIS
 
 app.add_middleware(
     CORSMiddleware,
@@ -590,100 +587,120 @@ def convert_to_bullets(text):
 # -----------------------------
 # MAIN GENERATION FUNCTION
 # -----------------------------
-def generate_soap_note(conversation, lab_pdf_path=None):
-    lab_results = {}
+# def generate_soap_note(conversation, lab_pdf_path=None):
+#     lab_results = {}
 
-    if lab_pdf_path:
-        try:
-            lab_text_raw = extract_text(lab_pdf_path)
-            lab_results = extract_lab_results(lab_text_raw)
-        except Exception as e:
-            print("Lab processing error:", e)
+#     if lab_pdf_path:
+#         try:
+#             lab_text_raw = extract_text(lab_pdf_path)
+#             lab_results = extract_lab_results(lab_text_raw)
+#         except Exception as e:
+#             print("Lab processing error:", e)
 
-    lab_text = lab_results_to_text(lab_results)
+#     lab_text = lab_results_to_text(lab_results)
 
-    prompt = f"""
-    Generate a strictly factual SOAP note.
+#     prompt = f"""
+#     Generate a strictly factual SOAP note.
 
-    RULES:
-    - Use ONLY information from the conversation
-    - DO NOT add medical assumptions
-    - DO NOT include differential diagnosis
-    - If not mentioned, write "Not reported"
-    - Be concise and factual
-    - If a clinician asks checklist questions and patient does not explicitly confirm a symptom, do not include it as a finding
-    - Do not invent physical exam, vitals, labs, imaging, or treatment plan when absent
-    - Remove conversational fillers (e.g., um/uh/yeah) from output wording
-    - Do not copy clinician question stems as findings
-    - Prefer concise clinical phrasing over verbatim transcript style
+#     RULES:
+#     - Use ONLY information from the conversation
+#     - DO NOT add medical assumptions
+#     - DO NOT include differential diagnosis
+#     - If not mentioned, write "Not reported"
+#     - Be concise and factual
+#     - If a clinician asks checklist questions and patient does not explicitly confirm a symptom, do not include it as a finding
+#     - Do not invent physical exam, vitals, labs, imaging, or treatment plan when absent
+#     - Remove conversational fillers (e.g., um/uh/yeah) from output wording
+#     - Do not copy clinician question stems as findings
+#     - Prefer concise clinical phrasing over verbatim transcript style
 
-    Format:
-    Subjective:
-    Objective:
-    Assessment:
-    Plan:
+#     Format:
+#     Subjective:
+#     Objective:
+#     Assessment:
+#     Plan:
 
-    Conversation:
-    {conversation}
+#     Conversation:
+#     {conversation}
 
-    Lab Findings:
-    {lab_text}
+#     Lab Findings:
+#     {lab_text}
 
-    SOAP Note:
-    """
+#     SOAP Note:
+#     """
 
-    inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=1024
-        ).to(device)
+#     inputs = tokenizer(
+#             prompt,
+#             return_tensors="pt",
+#             truncation=True,
+#             max_length=1024
+#         ).to(device)
 
-    with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=180,
-                num_beams=1,
-                do_sample=False,
-                length_penalty=1.0,
-                no_repeat_ngram_size=3,
-                early_stopping=True
-            )
+#     with torch.no_grad():
+#     outputs = model.generate(
+#         **inputs,
+#         max_new_tokens=180,
+#         num_beams=1,
+#         do_sample=False,
+#         length_penalty=1.0,
+#         no_repeat_ngram_size=3,
+#         early_stopping=True
+#     )
 
-        result = tokenizer.decode(outputs[0], skip_special_tokens=True)
+#     result = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-        parsed = parse_soap_sections(result)
-        evidence_clean = enforce_evidence_rules(conversation, parsed)
-        sanitized = sanitize_sections(evidence_clean, conversation)
+#     parsed = parse_soap_sections(result)
+#     evidence_clean = enforce_evidence_rules(conversation, parsed)
+#     sanitized = sanitize_sections(evidence_clean, conversation)
         
 
-    # Inject lab into objective AFTER sanitization
-    if lab_results:
-        conv_obj = sanitized.get("objective", "")
-        lab_obj = lab_results_to_text(lab_results)
-        sanitized["objective"] = normalize_section(f"{conv_obj} {lab_obj}")
-        return apply_fallback_if_sparse(sanitized, conversation)
+#     # Inject lab into objective AFTER sanitization
+#     if lab_results:
+#         conv_obj = sanitized.get("objective", "")
+#         lab_obj = lab_results_to_text(lab_results)
+#         sanitized["objective"] = normalize_section(f"{conv_obj} {lab_obj}")
+#         return apply_fallback_if_sparse(sanitized, conversation)
 
 
 # -----------------------------
 # API ENDPOINT
-# -----------------------------
-@app.post("/generate-soap")
-async def generate_soap(data: ConversationInput):
+from fastapi import UploadFile, File, Form
+import shutil
+import os
 
-    preview = (data.conversation or "").strip()
-    print("[TRANSCRIPT]", preview if len(preview) <= 1200 else f"{preview[:1200]}... [truncated]")
+# @app.post("/generate-soap")
+# async def generate_soap(
+#     conversation: str = Form(...),
+#     lab_file: UploadFile = File(None)
+# ):
+#     preview = (conversation or "").strip()
+#     print("[TRANSCRIPT]", preview if len(preview) <= 1200 else f"{preview[:1200]}... [truncated]")
 
-    soap_note = generate_soap_note(
-    data.conversation,
-    data.lab_pdf_path
-)
+#     lab_path = None
 
-    return {
-    "soap_note": {
-        "subjective": convert_to_bullets(soap_note["subjective"]),
-        "objective": convert_to_bullets(soap_note["objective"]),
-        "assessment": convert_to_bullets(soap_note["assessment"]),
-        "plan": convert_to_bullets(soap_note["plan"]),
-    }
-}
+#     # ✅ Save lab file if present
+#     if lab_file:
+#         os.makedirs("uploads", exist_ok=True)
+#         lab_path = f"uploads/{lab_file.filename}"
+
+#         with open(lab_path, "wb") as buffer:
+#             shutil.copyfileobj(lab_file.file, buffer)
+
+#         print("📄 Lab file saved at:", lab_path)
+#     else:
+#         print("⚠️ No lab file received")
+
+#     # ✅ Pass correct lab_path
+#     soap_note = generate_soap_note(
+#         conversation,
+#         lab_path
+#     )
+
+#     return {
+#         "soap_note": {
+#             "subjective": convert_to_bullets(soap_note["subjective"]),
+#             "objective": convert_to_bullets(soap_note["objective"]),
+#             "assessment": convert_to_bullets(soap_note["assessment"]),
+#             "plan": convert_to_bullets(soap_note["plan"]),
+#         }
+#     }
