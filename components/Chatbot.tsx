@@ -11,6 +11,7 @@ type StoredEmbedding = {
   noteId: string;
   vector: number[];
   text: string;
+  source?: 'ollama' | 'local';
 };
 
 type EmbeddingResult = {
@@ -22,6 +23,21 @@ const EMBEDDING_DIM = 128;
 
 const RAW_API_BASE = ((import.meta as any)?.env?.VITE_API_BASE || 'http://localhost:3001').replace(/\/$/, '');
 const API_ROOT = RAW_API_BASE.replace(/\/api$/i, '');
+
+const safeReadAuthState = (): AuthState => {
+  try {
+    const raw = localStorage.getItem('clinical_mind_auth');
+    if (!raw) return { user: null, type: null };
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return { user: null, type: null };
+    return {
+      user: parsed.user || null,
+      type: parsed.type === 'doctor' || parsed.type === 'patient' ? parsed.type : null,
+    };
+  } catch {
+    return { user: null, type: null };
+  }
+};
 
 const noteToText = (note: SOAPNote) =>
   [
@@ -136,7 +152,10 @@ ${question}
     
     // 2. CLEANING THE OUTPUT:
     // Sometimes local models add extra whitespace or "Assistant:" prefixes.
-    const cleanResponse = data?.response?.trim() || "I don't have enough information.";
+    const cleanResponse = (data?.response || '')
+      .replace(/^assistant\s*:\s*/i, '')
+      .replace(/^response\s*:\s*/i, '')
+      .trim() || "I don't have enough information.";
     
     return cleanResponse;
 
@@ -145,6 +164,22 @@ ${question}
     // Return a safe fallback rather than crashing the UI
     throw err; 
   }
+};
+
+const askGeminiModel = async (question: string, contexts: string[]): Promise<string> => {
+  const response = await fetch(`${API_ROOT}/api/gemini/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, contexts }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Gemini Error: ${response.status} - ${errText}`);
+  }
+
+  const data = await response.json();
+  return (data?.response || '').trim() || "I don't have enough information.";
 };
 
  
@@ -181,13 +216,59 @@ const buildLocalFallbackAnswer = (question: string, notes: SOAPNote[]): string =
 const getNotesFingerprint = (notes: SOAPNote[]) =>
   notes.map(n => `${n.id}:${n.timestamp}`).join('|');
 
+const lexicalScore = (query: string, text: string): number => {
+  const qTokens = new Set(tokenize(query));
+  const tTokens = new Set(tokenize(text));
+  if (qTokens.size === 0 || tTokens.size === 0) return 0;
+
+  let overlap = 0;
+  qTokens.forEach(token => {
+    if (tTokens.has(token)) overlap += 1;
+  });
+
+  return overlap / Math.max(1, Math.sqrt(qTokens.size * tTokens.size));
+};
+
+const normalizeText = (text: string) =>
+  (text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+
+const getReferencedPatientIds = (query: string, notes: SOAPNote[]): string[] => {
+  const normalizedQuery = normalizeText(query);
+  if (!normalizedQuery) return [];
+
+  const qTokens = new Set(tokenize(normalizedQuery));
+  const ids = new Set<string>();
+
+  for (const note of notes) {
+    const patientName = normalizeText(note.patientName || '');
+    const patientId = normalizeText(note.patientId || '');
+    if (!patientName && !patientId) continue;
+
+    // Direct mention via patient id or full patient name has highest priority.
+    if ((patientId && normalizedQuery.includes(patientId)) || (patientName && normalizedQuery.includes(patientName))) {
+      ids.add(note.patientId);
+      continue;
+    }
+
+    // Handle short queries like "issue with srihith" by matching rare name tokens.
+    const nameTokens = tokenize(patientName).filter(t => t.length >= 3);
+    if (nameTokens.some(t => qTokens.has(t))) {
+      ids.add(note.patientId);
+    }
+  }
+
+  return Array.from(ids);
+};
+
+const buildDoctorInitialMessage = (doctorName: string) =>
+  `Hello Dr. ${doctorName.split(' ').pop()}. Please provide a patient name or patient ID to begin.`;
+
 const Chatbot: React.FC<ChatbotProps> = ({ history }) => {
-  const authSaved = localStorage.getItem('clinical_mind_auth');
-  const authState: AuthState = authSaved ? JSON.parse(authSaved) : { user: null, type: null };
+  const authState: AuthState = safeReadAuthState();
   const userName = authState.user ? (authState.type === 'doctor' ? (authState.user as any).fullName : (authState.user as any).name) : 'there';
   
   const initialMessage = authState.type === 'doctor' 
-    ? `Hello Dr. ${userName.split(' ').pop()}. I have access to your clinical records. How can I help you query the patient database today?`
+    ? buildDoctorInitialMessage(userName)
     : `Hello ${userName.split(' ')[0]}, I am your personal health assistant. I have access to your medical history. What would you like to know about your recent visits?`;
 
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -198,9 +279,14 @@ const Chatbot: React.FC<ChatbotProps> = ({ history }) => {
   const [isIndexing, setIsIndexing] = useState(false);
   const [needsIndex, setNeedsIndex] = useState(false);
   const [indexStatus, setIndexStatus] = useState<string>('');
+  const [selectedPatientId, setSelectedPatientId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const selectedPatientName = selectedPatientId
+    ? scopedHistory.find(n => n.patientId === selectedPatientId)?.patientName || selectedPatientId
+    : null;
 
   const embeddingStorageKey = authState.user
     ? `chat_embeddings_${authState.type}_${(authState.user as any).id}`
@@ -252,7 +338,7 @@ const Chatbot: React.FC<ChatbotProps> = ({ history }) => {
         const text = noteToText(note);
         const embedding = await fetchEmbedding(text);
         if (embedding.source === 'local') usedLocalFallback = true;
-        built.push({ noteId: note.id, text, vector: embedding.vector });
+        built.push({ noteId: note.id, text, vector: embedding.vector, source: embedding.source });
       }
       setEmbeddings(built);
       setNeedsIndex(false);
@@ -321,17 +407,81 @@ const Chatbot: React.FC<ChatbotProps> = ({ history }) => {
 
     let contexts: string[] = [];
     let candidateNotes: SOAPNote[] = [];
+    
+    if (authState.type === 'doctor' && !selectedPatientId) {
+      const mentioned = getReferencedPatientIds(userInput.toLowerCase(), scopedHistory);
+      if (mentioned.length === 0) {
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: 'Please provide a patient name or patient ID first. Example: "Show records for P003" or "Tell me about Srihith".'
+        }]);
+        return;
+      }
+
+      if (mentioned.length > 1) {
+        const options = Array.from(new Set(
+          scopedHistory
+            .filter(n => mentioned.includes(n.patientId))
+            .map(n => `${n.patientName} (${n.patientId})`)
+        ));
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: `I found multiple patients in your query: ${options.join(', ')}. Please provide one exact patient name or ID.`
+        }]);
+        return;
+      }
+
+      const patientId = mentioned[0];
+      const patientName = scopedHistory.find(n => n.patientId === patientId)?.patientName || patientId;
+      setSelectedPatientId(patientId);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `Patient selected: ${patientName} (${patientId}). Ask your question about this patient's records.`
+      }]);
+      return;
+    }
+
+    const referencedPatientIds = getReferencedPatientIds(userInput, scopedHistory);
+    const hasExplicitPatientReference = referencedPatientIds.length > 0;
+    let retrievalPool: SOAPNote[] = [];
+
+    if (referencedPatientIds.length > 0) {
+
+      // fetch only that patient's notes from mongodb
+      retrievalPool = await dbService.getNotes({
+        patientId: referencedPatientIds[0]
+      });
+
+    } else if (selectedPatientId) {
+
+      retrievalPool = await dbService.getNotes({
+        patientId: selectedPatientId
+      });
+
+    } else {
+
+      retrievalPool = scopedHistory;
+    }
+
+    if (selectedPatientId && hasExplicitPatientReference && !referencedPatientIds.includes(selectedPatientId)) {
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `You are currently querying ${selectedPatientName} (${selectedPatientId}). Click Restart to switch to another patient.`
+      }]);
+      return;
+    }
 
     // 2. Semantic Search with Relevancy Guard
     if (embeddings.length > 0) {
       const queryEmbedding = await fetchEmbedding(userInput);
+      const similarityThreshold = queryEmbedding.source === 'local' ? 0.2 : 0.62;
       const ranked = embeddings
         .map(e => ({
-          note: scopedHistory.find(n => n.id === e.noteId),
+          note: retrievalPool.find(n => n.id === e.noteId),
           text: e.text,
           score: cosineSim(queryEmbedding.vector, e.vector)
         }))
-        .filter(item => !!item.note && item.score > 0.68) // Increased threshold to 0.68
+        .filter(item => !!item.note && item.score > similarityThreshold)
         .sort((a, b) => b.score - a.score)
         .slice(0, 3);
       
@@ -339,13 +489,30 @@ const Chatbot: React.FC<ChatbotProps> = ({ history }) => {
       candidateNotes = ranked.map(item => item.note as SOAPNote);
     }
 
+    // 2b. Lexical fallback retrieval if semantic search misses.
+    if (contexts.length === 0 && retrievalPool.length > 0) {
+      const lexicalRanked = retrievalPool
+        .map(note => {
+          const text = noteToText(note);
+          return { note, text, score: lexicalScore(userInput, text) };
+        })
+        .filter(item => item.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 2);
+
+      if (lexicalRanked.length > 0) {
+        contexts = lexicalRanked.map(item => item.text);
+        candidateNotes = lexicalRanked.map(item => item.note);
+      }
+    }
+
     // 3. Smart Decision Logic
     // If no specific records were found via semantic search, 
     // only fall back to "latest" if the query actually looks like a health question.
-    const isHealthRelated = /patient|status|health|med|plan|diagnosis|treatment|visit|history|varshith/i.test(userInput);
+    const isHealthRelated = /patient|status|health|med|plan|diagnosis|treatment|visit|history|issue|problem|follow-?up|symptom/i.test(userInput);
 
-    if (contexts.length === 0 && isHealthRelated) {
-      const latest = scopedHistory.slice(0, 2);
+    if (contexts.length === 0 && isHealthRelated && !hasExplicitPatientReference) {
+      const latest = retrievalPool.slice(0, 2);
       contexts = latest.map(noteToText);
       candidateNotes = latest;
     }
@@ -360,9 +527,13 @@ const Chatbot: React.FC<ChatbotProps> = ({ history }) => {
     } else {
       let response = '';
       try {
-        response = await askRagModel(userInput, contexts);
+        response = await askGeminiModel(userInput, contexts);
       } catch {
-        response = buildLocalFallbackAnswer(userInput, candidateNotes);
+        try {
+          response = await askRagModel(userInput, contexts);
+        } catch {
+          response = buildLocalFallbackAnswer(userInput, candidateNotes);
+        }
       }
       setMessages(prev => [...prev, { role: 'assistant', content: response }]);
     }
@@ -384,6 +555,11 @@ const Chatbot: React.FC<ChatbotProps> = ({ history }) => {
         <p className="text-xs text-slate-500">
           {authState.type === 'doctor' ? `Accessing ${scopedHistory.length} patient records` : `Reviewing your ${scopedHistory.length} clinical records`}
         </p>
+        {authState.type === 'doctor' && selectedPatientId && (
+          <p className="text-xs text-blue-700 mt-1">
+            Active patient: {selectedPatientName} ({selectedPatientId})
+          </p>
+        )}
         <div className="mt-2 flex items-center gap-2">
           <button
             onClick={handleIndexRecords}
@@ -392,6 +568,18 @@ const Chatbot: React.FC<ChatbotProps> = ({ history }) => {
           >
             {isIndexing ? 'Indexing...' : 'Index Records'}
           </button>
+          {authState.type === 'doctor' && (
+            <button
+              onClick={() => {
+                setSelectedPatientId(null);
+                setInput('');
+                setMessages([{ role: 'assistant', content: buildDoctorInitialMessage(userName) }]);
+              }}
+              className="px-3 py-1 text-xs font-semibold rounded-md bg-slate-700 text-white hover:bg-slate-800"
+            >
+              Restart
+            </button>
+          )}
           {needsIndex && !isIndexing && (
             <span className="text-xs text-amber-600">Index is outdated. Chat will use latest records until re-indexed.</span>
           )}

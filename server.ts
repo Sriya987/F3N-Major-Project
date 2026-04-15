@@ -7,12 +7,15 @@ import express from 'express';
 import { MongoClient, ServerApiVersion, ObjectId } from 'mongodb';
 import cors from 'cors';
 import * as dotenv from 'dotenv';
+import { GoogleGenAI } from '@google/genai';
 
 // Load environment variables
 dotenv.config({ path: '.env.local' });
 
 const app = express();
 const port = 3001;
+const geminiApiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
+const geminiClient = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
 
 // Fix: Use 'any' casting to resolve type mismatches with express middleware overloads (Error in server.ts on line 13 & 14)
 app.use(cors() as any);
@@ -75,6 +78,47 @@ app.post('/api/ollama/embeddings', async (req, res) => {
   } catch (err: any) {
     console.error('Ollama embeddings proxy error:', err);
     return res.status(500).json({ error: err.message || 'Ollama embeddings connection failed' });
+  }
+});
+
+// GEMINI CHAT PROXY
+app.post('/api/gemini/generate', async (req, res) => {
+  try {
+    if (!geminiClient) {
+      return res.status(503).json({ error: 'Gemini is not configured on server. Set API_KEY or GEMINI_API_KEY.' });
+    }
+
+    const { question, contexts } = req.body as { question?: string; contexts?: string[] };
+    if (!question || typeof question !== 'string') {
+      return res.status(400).json({ error: 'question is required' });
+    }
+
+    const safeContexts = Array.isArray(contexts) ? contexts.filter(c => typeof c === 'string').slice(0, 4) : [];
+    const prompt = `
+You are a highly precise Medical Record Assistant.
+Use ONLY the provided clinical context.
+
+Rules:
+1. Answer in 2-3 concise sentences.
+2. If context does not contain the answer, respond exactly: "I cannot find specific details for that in the clinical records."
+3. Do not provide diagnosis or medical advice beyond given records.
+
+Clinical Context:
+${safeContexts.length ? safeContexts.join('\n---\n') : 'No relevant records found.'}
+
+User Question:
+${question}
+`;
+
+    const response = await geminiClient.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+    });
+
+    return res.json({ response: (response.text || '').trim() });
+  } catch (err: any) {
+    console.error('Gemini proxy error:', err);
+    return res.status(500).json({ error: err?.message || 'Gemini request failed' });
   }
 });
 
