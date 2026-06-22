@@ -4,14 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "server": "tsx server.ts",
-    "soap-api": ".\\.venv\\Scripts\\uvicorn backend.soap_model_api:app --reload --host 127.0.0.1 --port 8000",
-    "build": "vite build",
-    "preview": "vite preview",
-    
-    "start": "vite --host 0.0.0.0 --port 8080"
-  },
+  "dev": "vite",
+  "server": "tsx server.ts",
+  "soap-api": ".\\.venv\\Scripts\\uvicorn backend.soap_model_api:app --reload --host 127.0.0.1 --port 8000",
+  "build": "vite build",
+  "preview": "vite preview",
+  "start": "npm run build && npm run server"
+},
   "dependencies": {
     "@google/genai": "^1.39.0",
     "cors": "^2.8.6",
